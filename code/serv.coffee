@@ -14,6 +14,7 @@ express = require 'express'
 request = require 'request'
 exec    = require('child_process').exec
 mongoose = require 'mongoose'
+bcrypt = require 'bcrypt'
 
 User = require 'models/user'
 Box = require 'models/box'
@@ -130,6 +131,19 @@ app.get "/:profile/:project/files/*", (req, res) ->
       res.send {error:"Error reading #{path}"}, 500
   su.on 'exit', (code) ->
       res.end()
+
+# Auth using a username and password
+app.post "/passwd_auth/?", (req, res) ->
+  timelog "Trying to auth #{req.body.profile}"
+  User.findOne {shortname: req.body.profile}, (err, user) ->
+    timelog err if err?
+    if user
+      if bcrypt.compareSync req.body.password, user.password
+        res.send 200
+      else
+        res.send 403
+    else
+      res.send 403
 
 # Exec endpoint - see wiki for note about security
 app.post "/:profile/:project/exec/?", check_api_key

@@ -3,11 +3,6 @@
 # serv.coffee
 # http server for cobalt.
 
-nodetime = require 'nodetime'
-nodetime.profile
-  accountKey: process.env.NODETIME_KEY
-  appName: "#{process.env.CO_NODETIME_APP} #{require('os').hostname()}"
-
 {exec}  = require 'child_process'
 fs      = require 'fs'
 path    = require 'path'
@@ -22,6 +17,8 @@ checkIdent = require 'ident-express'
 _ = require 'underscore'
 redis = require 'redis'
 
+liverpool_office_ip = '151.237.236.138'
+
 # The test rely on the redis client being created now at module import time,and rely on the
 # listen happening later, when the .start() method is called.
 exports.redisClient = redisClient = redis.createClient 6379, process.env.REDIS_SERVER
@@ -34,39 +31,30 @@ redisClient.on 'pmessage', (pattern, channel, message) ->
   updatePath = "tool/hooks/update"
   #TODO: try catch
   message = JSON.parse message
+  origin = message.origin
+
+  url = "https://#{origin.boxServer}/#{origin.box}/#{origin.boxJSON.publish_token}"
 
   #TODO(pwaller): use async exists
   for box in message.boxes
     if fs.existsSync "/#{process.env.CO_STORAGE_DIR}/home/#{box}/#{updatePath}"
       console.log "Executing update hook for #{box}"
-      child_process.exec "su #{box} -l -c /home/#{updatePath}"
+      arg0 = "/home/#{updatePath}"
+      cmd = arg0 + ' "$@"'
+      run = "su #{box} -l -c '#{cmd}' -- #{arg0} #{url}"
+      console.log "Running: ", run
+      child_process.exec run
 
 Box = require 'models/box'
 User = require 'models/user'
 
 app = express()
 
-# TODO: move into npm module
-nodetimeLog = (req, res, next) ->
-  matched = _.find app.routes[req.method.toLowerCase()], (route) ->
-    if route.regexp.test req.url
-      if route.path isnt '*'
-        return true
-  if matched?
-    name = "#{req.method} #{matched.path}"
-    res.nodetimePromise = nodetime.time 'Cobalt request ', name, req.url
-    oldSend = res.send
-    res.send = (args... ) ->
-      res.nodetimePromise.end()
-      oldSend.apply res, args
-  return next()
-
 # Trust the headers from nginx and change req.ip to the real IP
 # of the connecting dude.
 app.set "trust proxy", true
 
 app.use express.bodyParser()
-app.use nodetimeLog
 
 app.configure 'staging', ->
   app.use express.logger()
@@ -112,7 +100,7 @@ check_api_key = (req, res, next) ->
     next()
 
 check_box = (req, res, next) ->
-  if process.env.CO_AVOID_BOX_CHECK
+  if process.env.CO_AVOID_BOX_CHECK == 'yes'
     return next()
   if req.params.boxname?
     Box.findOne {name:req.params.boxname}, (err, box) ->
@@ -146,6 +134,7 @@ allowedIP = allowedIP.concat [
     "88.211.55.91"
     "176.58.127.147"
     "23.23.37.109"
+    liverpool_office_ip
     ]
 # Middleware that checks the IP address of the connecting
 # partner (which we expect to be custard).
@@ -171,7 +160,7 @@ fresh_apikey = ->
 
 docs = (req, res) ->
   res.header('Content-Type', 'application/json')
-  res.send "See https://beta.scraperwiki.com/help/developer/", 200
+  res.send "See https://scraperwiki.com/help/developer/", 200
 
 app.get "/", docs
 app.get "/:boxname/?", docs
@@ -218,17 +207,26 @@ app.post "/:boxname/exec/?", maxInFlightMiddleware(5), check_api_and_box, (req, 
   req.on 'close', -> su.kill()
 
 myCheckIdent = (req, res, next) ->
-  if req.ip in ["88.211.55.91", "127.0.0.1"]
+  # ScraperWiki office / localhost
+  if req.ip in [liverpool_office_ip, "10.0.0.10", "127.0.0.1"]
     req.ident = 'root'
     next()
   else
     checkIdent req, res, next
 
+requireAuth = (req, res, next) ->
+  if req.ident in ["root", "custard"]
+    next()
+  else
+    return res.send 403
+      error: 'Only Custard running as Root can contact me'
+
+
 # Create a box.
 # Since we're creating a box, it doesn't have to exist, so we
 # don't need to call check_box().
 
-app.post "/box/:newboxname/?", check_api_key, checkIP, myCheckIdent, (req, res) ->
+app.post "/box/:newboxname/?", check_api_key, checkIP, myCheckIdent, requireAuth, (req, res) ->
   console.tick "got request create box #{req.params.newboxname}"
   res.header('Content-Type', 'application/json')
   boxname = req.params.newboxname
@@ -236,9 +234,6 @@ app.post "/box/:newboxname/?", check_api_key, checkIP, myCheckIdent, (req, res) 
   if not re.test boxname
     return res.send 404,
       error: "Box name should match the regular expression #{String(re)}"
-  if req.ident != 'root'
-    return res.send 403
-      error: 'Only Custard running as Root can contact me'
   if not req.body.uid?
     return res.send 400,
       error: "Specify a UID"
@@ -250,14 +245,11 @@ app.post "/box/:newboxname/?", check_api_key, checkIP, myCheckIdent, (req, res) 
       console.tick "added unix user #{boxname}"
       any_stderr = stderr is not ''
       console.log "Error adding user: #{err} #{stderr}" if err? or any_stderr
-      return res.send {error: "Unable to create box"} if err? or any_stderr
-      return res.send stdout
+      return res.send 500, {error: "Unable to create box"} if err? or any_stderr
+      return res.send {"status": "ok"}
 
 # Add an SSH key to a box
-app.post "/:boxname/sshkeys/?", checkIP, myCheckIdent, (req, res) ->
-  if req.ident != 'root'
-    return res.send 400,
-      error: "Only custard running as root can contact me"
+app.post "/:boxname/sshkeys/?", checkIP, myCheckIdent, requireAuth, (req, res) ->
   boxname = req.params.boxname
 
   res.header('Content-Type', 'application/json')
@@ -317,8 +309,6 @@ exports.unix_user_add = (user_name, uid, callback) ->
         . ./code/box_lib.sh &&
         create_user #{user_name} #{uid} &&
         create_user_directories #{user_name}
-        sh ./code/templates/box.json.template | tee #{homeDir}/#{user_name}/box.json
-        chown #{user_name}:databox #{homeDir}/#{user_name}/box.json
         """
   # insecure - sanitise user_name
   console.log cmd
@@ -354,7 +344,7 @@ exports.stop = (cb) ->
 # Wait for all connections to finish before quitting
 process.on 'SIGTERM', ->
   if server
-    server.stop ->
+    server.close ->
       console.warn "All connections finished, exiting"
       process.exit()
   else

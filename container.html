@@ -1,5 +1,6 @@
 <html>
-<script src="//cdnjs.cloudflare.com/ajax/libs/easyXDM/2.4.17.1/easyXDM.min.js"></script>
+<script src="https://scraperwiki.com/vendor/js/easyXDM.min.js"></script>
+<script src="//cdnjs.cloudflare.com/ajax/libs/json2/20121008/json2.min.js"></script>
 <script type="text/javascript">
 scraperwiki = {}
 // This is the provider side of XDM.
@@ -12,15 +13,21 @@ scraperwiki.xdm = new easyXDM.Rpc({
         iframe.height = '100%'
         iframe.name = 'toolContent'
         document.body.appendChild(iframe);
-    },
+    }
   }, {
     remote: {
-      // redirect and get URL are the names of methods implemented
-      // by custard
+      // These easyXDM methods are used by custard
+      // (in client/code/view/tool/content.coffee) and
+      // ultimately exposed to developers via asynchronous
+      // functions in scraperwiki.com/js/scraperwiki.js
       redirect: {},
       getURL: {},
       rename: {},
-      pushSQL: {}
+      pushSQL: {},
+      getUserDetails: {},
+      reportingMessage: {},
+      reportingUser: {},
+      reportingTag: {}
     }
   });
 </script>
